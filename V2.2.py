@@ -243,8 +243,8 @@ def ada_boost_train_ds_with_flipping(data_arr, class_labels, num_it=100):
 
     # ==================== 核心修改：为“涟漪”拓展机制做准备 ====================
     # a. 定义“拓展”的邻域大小和增益强度
-    EXPANSION_NEIGHBORS = 3  # 拓展时查找的邻居数量
-    PROXIMITY_BOOST_FACTOR = 2  # 对周边样本的概率增强倍数
+    EXPANSION_NEIGHBORS = 10  # 拓展时查找的邻居数量
+    PROXIMITY_BOOST_FACTOR = 3  # 对周边样本的概率增强倍数
 
     # b. 预构建k-NN模型，用于在迭代中快速查找周边样本
     print(f"--- Building k-NN model for expansion mechanism (k={EXPANSION_NEIGHBORS}) ---")
@@ -265,7 +265,7 @@ def ada_boost_train_ds_with_flipping(data_arr, class_labels, num_it=100):
                 class_est = stump_classify(np.mat(data_arr), weak_class_arr[j]["dim"], weak_class_arr[j]["thresh"], weak_class_arr[j]["ineq"])
                 agg_class_est += alpha_list[j] * class_est
 
-            posterior_prob = posterior_prob = 0.5 * (np.tanh(agg_class_est.A) + 1).flatten()
+            posterior_prob = 0.5 * (np.tanh(agg_class_est.A) + 1).flatten()
 
             # ==================== 核心修改：实现“涟漪”拓展翻转逻辑 ====================
             # 1. 创建一个动态的“邻近度增益”数组，基础为1（无增益）
@@ -280,22 +280,14 @@ def ada_boost_train_ds_with_flipping(data_arr, class_labels, num_it=100):
                 # 为这些“拓展区域”的样本施加概率增益
                 proximity_gain[expansion_indices] = PROXIMITY_BOOST_FACTOR
 
-            # 3. 计算最终翻转概率，结合三种信息：
-            #    - 模型本身预测的概率 (posterior_prob)
-            #    - 静态的边界/安全区增益 (static_flipping_gain)
-            #    - 动态的周边拓展增益 (proximity_gain)
-
-            # 候选池依然是全体多数类样本，没有缩小
+            # 3. 计算最终翻转概率
             majority_indices = np.where(encoded_labels == -1)[0]
 
             base_probs = posterior_prob[majority_indices]
             static_gain = static_flipping_gain[majority_indices]
             dynamic_gain = proximity_gain[majority_indices]
 
-            # 综合计算调整后的概率
             adjusted_flipping_probs = base_probs * static_gain * dynamic_gain
-
-            # 确保概率值不会超过1.0
             adjusted_flipping_probs = np.clip(adjusted_flipping_probs, 0, 1.0)
             # =======================================================================
 
@@ -303,8 +295,6 @@ def ada_boost_train_ds_with_flipping(data_arr, class_labels, num_it=100):
             flipped_mask = random_values < adjusted_flipping_probs
 
             indices_to_flip_this_round = majority_indices[flipped_mask]
-
-            # 更新状态，为下一轮“拓展”做准备
             last_flipped_indices = indices_to_flip_this_round
 
             if len(indices_to_flip_this_round) > 0:
@@ -312,8 +302,10 @@ def ada_boost_train_ds_with_flipping(data_arr, class_labels, num_it=100):
 
         best_stump, _, _ = build_stump(data_arr, encoded_labels_for_stump, D)
         original_predictions = stump_classify(np.mat(data_arr), best_stump["dim"], best_stump["thresh"], best_stump["ineq"])
+
+        # 在这里，我们必须使用训练时的标签(encoded_labels_for_stump)来计算误差
         err_arr = np.mat(np.ones((m, 1)))
-        err_arr[original_predictions == np.mat(encoded_labels).T] = 0
+        err_arr[original_predictions == np.mat(encoded_labels_for_stump).T] = 0
         error = float((D.T * err_arr).item())
         error = max(error, 1e-16)
         alpha = 0.5 * np.log((1.0 - error) / error)
@@ -322,7 +314,12 @@ def ada_boost_train_ds_with_flipping(data_arr, class_labels, num_it=100):
         weak_class_arr.append(best_stump)
         alpha_list.append(alpha)
 
-        base_expon = np.multiply(-alpha * np.mat(encoded_labels).T, original_predictions)
+        # ####################################################################
+        # ##                      >>> 核心修正点 <<<                      ##
+        # ##  使用弱学习器训练时所用的“临时标签”来更新权重。               ##
+        # ##  这样，对于被成功翻转的样本，它被视为“分类正确”，权重会减小。   ##
+        # ####################################################################
+        base_expon = np.multiply(-alpha * np.mat(encoded_labels_for_stump).T, original_predictions)
         D = np.multiply(D, 0.6 * np.exp(base_expon))
         D /= D.sum()
 
@@ -338,13 +335,13 @@ def ada_boost_train_ds_with_flipping(data_arr, class_labels, num_it=100):
 
 # --- 6. 主执行流程 ---
 if __name__ == '__main__':
-    file_path = "二分类数据集/appendicitis.csv"
-    df = pd.read_csv(file_path)
+    file_path = "二分类数据集/值得实验的/balance.csv"
+    df = pd.read_csv(file_path).dropna()
 
     X = df.iloc[:, :-1].values
     y = df.iloc[:, -1].values
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.3, random_state=42, stratify=y
+        X, y, test_size=0.3, random_state=42
     )
 
     scaler = StandardScaler()
